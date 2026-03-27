@@ -12,12 +12,13 @@ pip install pyaudio
 pip install vosk
 pip install openai
 pip install numpy
-pip install pyttsx3 pyaudio webrtcvad
+pip install pyttsx3 pyaudio 
+pip install noisereduce
 
 vosk models need unzip in models directory
 
 Execute the code:
 in voicelink/interface directory, run:
 
-python3 llmchatwithQianWen_v5.py
+python3 llmchatwithQianWen.py
 

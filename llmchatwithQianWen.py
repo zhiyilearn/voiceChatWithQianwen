@@ -18,13 +18,17 @@ import subprocess
 
 import noisereduce as nr
 
-import whisper
 import tempfile
 import os
 import sys
 import wave
 
-# Audio recording parameters
+import whisper
+import os
+# 启用镜像（自动走国内CDN）
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+# Audio recording parametersls
 FORMAT = pyaudio.paInt16  # 16-bit resolution
 CHANNELS = 1              # Mono audio
 RATE = 16000              # 16kHz sample rate (good for speech)
@@ -66,8 +70,7 @@ class llmchatwithQianWenSystem:
             sys.exit(1)
         
         # ---------------------- Critical Fix: Separate Vosk Recognizers ----------------------
-        # Recognizer 1: For user speech recognition (main thread)
-        self.recognizer_recognition = KaldiRecognizer(self.vosk_model, 16000)
+        
         # Recognizer 2: For interrupt detection (background thread)
         self.recognizer_interrupt = KaldiRecognizer(self.vosk_model, 16000)
 
@@ -173,21 +176,9 @@ class llmchatwithQianWenSystem:
 
     # ---------------------- Microphone Input (Refactored) ----------------------
     def record_audio(self, filename):
-        '''
-        audio = pyaudio.PyAudio()
-
-        try:
-            stream = audio.open(format=FORMAT, channels=CHANNELS,
-                            rate=RATE, input=True,
-                            frames_per_buffer=CHUNK)
-        except Exception as e:
-            print(f"Error accessing microphone: {e}")
-            audio.terminate()
-            sys.exit(1)
-        '''
         print("🎤 Recording... Speak now!")
         frames = []
-
+        
         try:
             for _ in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
                 data = self.stream.read(CHUNK, exception_on_overflow=False)

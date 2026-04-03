@@ -14,6 +14,9 @@ pip install numpy
 pip install pyttsx3 pyaudio webrtcvad
 pip install scipy
 pip install noisereduce
+pip install openai-whisper -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+
 pip install -U openai-whisper
 
 vosk models need unzip in models directory
@@ -22,4 +25,6 @@ Execute the code:
 in voicelink/interface directory, run:
 
 python3 llmchatwithQianWen.py
+
+
 

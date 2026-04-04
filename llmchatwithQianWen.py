@@ -2,7 +2,6 @@
 from openai import OpenAI
 import os
 import sys
-import vosk
 import pyttsx3
 import numpy as np
 import threading
@@ -10,21 +9,12 @@ import time
 import signal
 import json
 import pyaudio
-
-from vosk import Model, KaldiRecognizer
-import pyaudio
-import json
 import subprocess
-
-import noisereduce as nr
-
 import tempfile
-import os
-import sys
 import wave
+import webrtcvad
 
 import whisper
-import os
 # 启用镜像（自动走国内CDN）
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
@@ -35,6 +25,16 @@ RATE = 16000              # 16kHz sample rate (good for speech)
 CHUNK = 512               # Buffer size
 RECORD_SECONDS = 10         # Duration of recording
 TEMP_WAV = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
+
+# For chunk separation
+import re
+
+# For human voice detection
+# Audio Configuration (optimized for voice detection)
+# --------------------------
+CHUNK_DURATION_MS = 30  # 30ms chunks (required for VAD)
+CHUNK_SIZE = int(RATE * CHUNK_DURATION_MS / 1000)
+
 
 class llmchatwithQianWenSystem:
     def __init__(self):
@@ -53,13 +53,6 @@ class llmchatwithQianWenSystem:
             "role": "system",
             "content": "你是一个有用的中文智能助手，回答简洁、准确、友好。"
         })
-
-        # Vosk Automatic Speech Synthesis Initialization
-        try:
-            self.vosk_model = Model("../models/vosk-model-small-cn-0.3")
-        except Exception as e:
-            print(f"Vosk Model Error: {e}")
-            sys.exit(1)
         
         # Whisper Speech Recognition Initialization
         try:
@@ -70,10 +63,6 @@ class llmchatwithQianWenSystem:
             sys.exit(1)
         
         # ---------------------- Critical Fix: Separate Vosk Recognizers ----------------------
-        
-        # Recognizer 2: For interrupt detection (background thread)
-        self.recognizer_interrupt = KaldiRecognizer(self.vosk_model, 16000)
-
               
         # Microphone Stream (persistent - avoid reinitializing)
         self.p = pyaudio.PyAudio()
@@ -82,8 +71,13 @@ class llmchatwithQianWenSystem:
             channels=1,
             rate=16000,
             input=True,
+            # frames_per_buffer=CHUNK_SIZE
             frames_per_buffer=512
         )
+
+        # Initialize VAD (Voice Activity Detector)
+        # Aggressiveness: 0-3 (3 = most strict, filters more noise)
+        self.vad = webrtcvad.Vad(3)
 
         # Handle microphone recording and AST with whisper
         # Thread-Safe Interrupt Flags (core for speaker interruption)
@@ -136,20 +130,39 @@ class llmchatwithQianWenSystem:
 
     # ---------------------- Wakeup (Modified for Interruption) ----------------------
     def wakeup(self):
-        self.input_text = "你好，我已准备好与你对话"
+        self.input_text = "你好"
         engine = self.setup_chinese_tts()
         # Use interruptible TTS for wakeup
-        self._speak_with_interrupt(self.input_text, engine)
+        engine.say(self.input_text)
+        engine.runAndWait()
+        engine.stop()
         return self.input_text
+
+    def split_text_by_separators(self, text: str) -> list:
+        """
+        Split text into chunks using separators: , . ? !
+        Preserves the separator at the end of each chunk
+        """
+        # Regex pattern: split AFTER any of , . ? !
+        pattern = r'(?<=[,.?!])|\n'
+
+        # Split text and clean empty/whitespace chunks
+        chunks = re.split(pattern, text)
+        chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
+        print(chunks)
+        return chunks
 
     # ---------------------- Core: Interruptible TTS Playback ----------------------
     def _speak_with_interrupt(self, text, engine):
         """Internal method: speak text with real-time interruption support"""
         self.tts_playing = True
-        # self.interrupt_tts.clear()  # Reset interrupt flag
+        self.interrupt_tts.clear()  # Reset interrupt flag
 
         # Split Chinese text into small chunks for granular interruption
-        chunks = text.split('，') if '，' in text else text.split('。')
+        # chunks = text.split('，') if '，' in text else text.split('。')
+        #chunks = text.split('\n') if '\n' in text else text.split('。')
+        # Split Chinese text into small chunks based on separator , ? .
+        chunks = self.split_text_by_separators(text)
         if len(chunks) == 1:
             chunks = list(text)  # Fallback to individual characters
 
@@ -224,6 +237,11 @@ class llmchatwithQianWenSystem:
         return self.input_text
 
 
+    def is_human_voice(self, audio_chunk):
+        """Verify if audio chunk contains human voice (returns True/False)"""
+        # Convert raw audio to bytes (VAD input format)
+        return self.vad.is_speech(audio_chunk, RATE)
+    
     # ---------------------- Background: Microphone Interrupt Monitor ----------------------
     def _mic_interrupt_monitor(self):
         """Background thread: monitor mic for voice to interrupt TTS"""
@@ -231,29 +249,19 @@ class llmchatwithQianWenSystem:
         while True:
             # Only monitor when TTS is playing (save CPU)
             if self.tts_playing:
-                raw_data = self.stream.read(512, exception_on_overflow=False)
+                raw_data = self.stream.read(CHUNK_SIZE, exception_on_overflow=False)
 
-                audio_data = np.frombuffer(raw_data, dtype=np.int16)
-                reduced_noise = nr.reduce_noise(y=audio_data, sr=16000)
-                cleaned_data = reduced_noise.tobytes()
-                
-                 # Use dedicated recognizer for interrupt detection
-                if not self.recognizer_interrupt.AcceptWaveform(cleaned_data):
-                    partial = json.loads(self.recognizer_interrupt.PartialResult())
-                    if partial["partial"].strip():
-                        print(partial["partial"])
-                        self.interrupt_tts.set()  # Trigger interruption
-                
-                # Check for complete voice (fallback)
+                # Check for human voice
+                voice_detected = self.is_human_voice(raw_data)
+        
+                 # Print result
+                if voice_detected:
+                    print("HUMAN VOICE DETECTED")
+                    self.interrupt_tts.set() 
                 else:
-                    result = json.loads(self.recognizer_interrupt.Result())
-                    if result["text"].strip():
-                        print(result["text"])
-                        # rms_amplitude = np.sqrt(np.mean(np.square(audio_data))) / 32768.0 
-                        # print(rms_amplitude)
-                        # if rms_amplitude > 0.1:
-                        self.interrupt_tts.set()  # Trigger interruption
-                        
+                    print("Silence / Noise")
+                    # self.interrupt_tts.clear() 
+                
             # Reduce CPU usage
             time.sleep(0.001)
 
